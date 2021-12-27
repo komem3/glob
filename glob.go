@@ -175,6 +175,7 @@ loopend:
 		runeNums := len(matchers)
 		return &Glob{
 			pattern:      matchers,
+			str:          pattern,
 			matchPattern: globPattern,
 			ddlPool: sync.Pool{
 				New: func() interface{} {
@@ -327,4 +328,8 @@ func (g *Glob) Match(s string) bool {
 	*pool = dp[:0]
 	g.ddlPool.Put(pool)
 	return len(dp[g.runeNums-1])+firstMatch == len(str) && dp[g.runeNums-1][len(dp[g.runeNums-1])-1]
+}
+
+func (g *Glob) String() string {
+	return g.str
 }
