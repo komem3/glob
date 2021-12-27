@@ -91,8 +91,6 @@ func TestGlob_MatchMultiByte(t *testing.T) {
 	}
 }
 
-var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
 const randNum = 1000
 
 func randSeq() []string {
