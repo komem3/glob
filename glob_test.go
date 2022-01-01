@@ -4,7 +4,6 @@ import (
 	"math/rand"
 	"regexp"
 	"testing"
-	"time"
 
 	"github.com/komem3/glob"
 )
@@ -58,7 +57,10 @@ func TestGlob_Match(t *testing.T) {
 				t.Fatal(err)
 			}
 			if match := matcher.Match(globText); match != tt.match {
-				t.Errorf("Match want %t, but got %t ", tt.match, match)
+				t.Fatalf("first Match want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match(globText); match != tt.match {
+				t.Fatalf("second Match want %t, but got %t ", tt.match, match)
 			}
 		})
 	}
@@ -75,6 +77,7 @@ func TestGlob_MatchMultiByte(t *testing.T) {
 		{"*世界*", true},
 		{"Hello*", true},
 		{"Hello**世界", true},
+		{"Hello*??", true},
 		{"Hello", false},
 	} {
 		tt := tt
@@ -85,141 +88,69 @@ func TestGlob_MatchMultiByte(t *testing.T) {
 				t.Fatal(err)
 			}
 			if match := matcher.Match(pattern); match != tt.match {
-				t.Errorf("Match want %t, but got %t ", tt.match, match)
+				t.Fatalf("first Match want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match(pattern); match != tt.match {
+				t.Fatalf("second Match want %t, but got %t ", tt.match, match)
 			}
 		})
 	}
 }
 
-const randNum = 1000
+var (
+	randNum     = 10000
+	letterRunes = []rune("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+)
+
+func randomString(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
+}
 
 func randSeq() []string {
-	rand.Seed(time.Now().UnixNano())
-	b := make([]string, 0, randNum)
-	for i := 0; i < randNum; i++ {
-		rb := make([]byte, 1000)
-		rand.Read(rb)
-		b = append(b, string(rb))
+	b := make([]string, randNum)
+	for i := 0; i < len(b); i++ {
+		b[i] = randomString(randNum)
 	}
 	return b
 }
 
+var benchTests = []struct {
+	name         string
+	globPattern  string
+	regexPattern string
+}{
+	{"full string", "a*a*ab*a", "^a.*a.*ab.*a$"},
+	{"front asterisk", "*?a*a", ".a.*a$"},
+	{"last asterisk", "*a*a*", "a.*a"},
+	{"equal", "aaaaaaaa", "^aaaaaaaa$"},
+	{"backward", "a*", "^a"},
+	{"forward", "*a", "a$"},
+	{"partial", "*a*", "a"},
+	{"one pass", "a??a", "^a..a$"},
+}
+
 func BenchmarkGlob_Match(b *testing.B) {
 	randStr := randSeq()
-	matcher, err := glob.Compile("*a*a*")
-	if err != nil {
-		b.Fatal(err)
+	for _, tt := range benchTests {
+		b.Run(tt.name, func(b *testing.B) {
+			b.Run("glob", func(b *testing.B) {
+				matcher := glob.MustCompile(tt.globPattern)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					matcher.Match(randStr[i%randNum])
+				}
+			})
+			b.Run("regex", func(b *testing.B) {
+				matcher := regexp.MustCompile(tt.regexPattern)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					matcher.MatchString(randStr[i%randNum])
+				}
+			})
+		})
 	}
-	regex, err := regexp.Compile("a.*a")
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ResetTimer()
-	b.Run("glob", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			matcher.Match(randStr[i%randNum])
-		}
-	})
-	b.ResetTimer()
-	b.Run("regex", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			regex.MatchString(randStr[i%randNum])
-		}
-	})
-}
-
-func BenchmarkGlob_Match_Equal(b *testing.B) {
-	randStr := randSeq()
-	matcher, err := glob.Compile("aaaaaaaa")
-	if err != nil {
-		b.Fatal(err)
-	}
-	regex, err := regexp.Compile("aaaaaaaa")
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ResetTimer()
-	b.Run("glob", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			matcher.Match(randStr[i%randNum])
-		}
-	})
-	b.ResetTimer()
-	b.Run("regex", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			regex.MatchString(randStr[i%randNum])
-		}
-	})
-}
-
-func BenchmarkGlob_Match_Backward(b *testing.B) {
-	randStr := randSeq()
-	matcher, err := glob.Compile("a*")
-	if err != nil {
-		b.Fatal(err)
-	}
-	regex, err := regexp.Compile("^a")
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ResetTimer()
-	b.Run("glob", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			matcher.Match(randStr[i%randNum])
-		}
-	})
-	b.ResetTimer()
-	b.Run("regex", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			regex.MatchString(randStr[i%randNum])
-		}
-	})
-}
-
-func BenchmarkGlob_Match_Forward(b *testing.B) {
-	randStr := randSeq()
-	matcher, err := glob.Compile("*a")
-	if err != nil {
-		b.Fatal(err)
-	}
-	regex, err := regexp.Compile("a$")
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ResetTimer()
-	b.Run("glob", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			matcher.Match(randStr[i%randNum])
-		}
-	})
-	b.ResetTimer()
-	b.Run("regex", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			regex.MatchString(randStr[i%randNum])
-		}
-	})
-}
-
-func BenchmarkGlob_Match_ForwardBackwardk(b *testing.B) {
-	randStr := randSeq()
-	matcher, err := glob.Compile("*a*")
-	if err != nil {
-		b.Fatal(err)
-	}
-	regex, err := regexp.Compile("a")
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ResetTimer()
-	b.Run("glob", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			matcher.Match(randStr[i%randNum])
-		}
-	})
-	b.ResetTimer()
-	b.Run("regex", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			regex.MatchString(randStr[i%randNum])
-		}
-	})
 }
