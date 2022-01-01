@@ -273,6 +273,7 @@ func (g *Glob) dfaMatch(s string) bool {
 			continue
 		}
 		if len(dfa.list) == 0 && len(dfa.asteriskNexts) == 0 {
+			g.dfaPool.Put(startPtr)
 			return false
 		}
 		var (
@@ -299,19 +300,16 @@ func (g *Glob) dfaMatch(s string) bool {
 			}
 		}
 		next = &dfaState{list: nlist, asteriskNexts: asteriskNexts, next: make(map[rune]*dfaState)}
-		if len(nlist) == 0 {
-			next.next[r] = next
-		}
 		dfa.next[r] = next
+		if len(nlist) == 0 && len(dfa.list) == 0 {
+			next.next = dfa.next
+		}
 		dfa = next
 	}
 
 	for _, st := range dfa.list {
-		if st.kind == asteriskKind && st.next.kind == matchedKind {
-			g.dfaPool.Put(startPtr)
-			return true
-		}
-		if st.kind == matchedKind {
+		if (st.kind == asteriskKind && st.next.kind == matchedKind) ||
+			st.kind == matchedKind {
 			g.dfaPool.Put(startPtr)
 			return true
 		}
