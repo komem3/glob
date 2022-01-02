@@ -163,7 +163,7 @@ loopend:
 				if patternState.kind == asteriskKind {
 					continue
 				}
-				patternState.next = &state{match: alwaysTrue, kind: asteriskKind, before: patternState}
+				patternState.next = &state{kind: asteriskKind, before: patternState}
 				patternState = patternState.next
 				matchPattern = globPattern
 			case !escape && runes[i] == '?':
@@ -204,9 +204,11 @@ loopend:
 			matchPattern: matchPattern,
 			onePassState: startState.next,
 			dfaPool: &sync.Pool{New: func() interface{} {
-				dfa := &dfaState{list: []*state{startState.next}, next: make(map[rune]*dfaState)}
+				dfa := &dfaState{next: make(map[rune]*dfaState)}
 				if startState.next.kind == asteriskKind {
-					dfa.list = append(dfa.list, startState.next.next)
+					dfa.asteriskNexts = append(dfa.asteriskNexts, startState.next.next)
+				} else {
+					dfa.list = append(dfa.list, startState.next)
 				}
 				return dfa
 			}},
@@ -280,30 +282,28 @@ func (g *Glob) dfaMatch(s string) bool {
 			nlist         []*state
 			asteriskNexts = dfa.asteriskNexts
 		)
-		for _, state := range dfa.list {
-			if state.kind == asteriskKind {
-				// The last asterisk matches all characters, so it's a match.
-				if state.next.kind == matchedKind {
-					g.dfaPool.Put(startPtr)
-					return true
+		for _, states := range [][]*state{dfa.list, dfa.asteriskNexts} {
+			for _, state := range states {
+				if state.match(r) {
+					if state.next.kind == asteriskKind {
+						// The last asterisk matches all characters, so it's a match.
+						if state.next.next.kind == matchedKind {
+							g.dfaPool.Put(startPtr)
+							return true
+						}
+						asteriskNexts = append(asteriskNexts, state.next.next)
+						continue
+					}
+					nlist = append(nlist, state.next)
 				}
-				asteriskNexts = append(asteriskNexts, state.next)
-				continue
-			}
-			if state.match(r) {
-				nlist = append(nlist, state.next)
 			}
 		}
-		for _, state := range dfa.asteriskNexts {
-			if state.match(r) {
-				nlist = append(nlist, state.next)
-			}
+		if len(nlist) == 0 && len(dfa.list) == 0 && len(asteriskNexts) == len(dfa.asteriskNexts) {
+			dfa.next[r] = dfa
+			continue
 		}
 		next = &dfaState{list: nlist, asteriskNexts: asteriskNexts, next: make(map[rune]*dfaState)}
 		dfa.next[r] = next
-		if len(nlist) == 0 && len(dfa.list) == 0 {
-			next.next = dfa.next
-		}
 		dfa = next
 	}
 

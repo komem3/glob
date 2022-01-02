@@ -10,11 +10,14 @@ import (
 
 const globText = "baaabab"
 
-var globTestPattern = []struct {
+type testCase = struct {
 	pattern string
 	match   bool
-}{
+}
+
+var globTestPattern = []testCase{
 	// match pattern
+	{"*", true},
 	{"baaabab", true},
 	{"b***bab", true},
 	{"*****ba*****ab", true},
@@ -47,11 +50,11 @@ var globTestPattern = []struct {
 }
 
 func TestGlob_Match(t *testing.T) {
-	t.Parallel()
+	// t.Parallel()
 	for _, tt := range globTestPattern {
 		tt := tt
 		t.Run(tt.pattern, func(t *testing.T) {
-			t.Parallel()
+			// t.Parallel()
 			matcher, err := glob.Compile(tt.pattern)
 			if err != nil {
 				t.Fatal(err)
@@ -66,13 +69,34 @@ func TestGlob_Match(t *testing.T) {
 	}
 }
 
+func TestGlob_MatchEmpty(t *testing.T) {
+	t.Parallel()
+	const empty = ""
+	for _, tt := range []testCase{
+		{"*", true},
+		{"", true},
+	} {
+		tt := tt
+		t.Run(tt.pattern, func(t *testing.T) {
+			t.Parallel()
+			matcher, err := glob.Compile(tt.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if match := matcher.Match(empty); match != tt.match {
+				t.Fatalf("first Match want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match(empty); match != tt.match {
+				t.Fatalf("second Match want %t, but got %t ", tt.match, match)
+			}
+		})
+	}
+}
+
 func TestGlob_MatchMultiByte(t *testing.T) {
 	t.Parallel()
 	const pattern = "Hello 世界"
-	for _, tt := range []struct {
-		pattern string
-		match   bool
-	}{
+	for _, tt := range []testCase{
 		{"*世界", true},
 		{"*世界*", true},
 		{"Hello*", true},
