@@ -21,6 +21,7 @@ var globTestPattern = []testCase{
 	{"baaabab", true},
 	{"b***bab", true},
 	{"*****ba*****ab", true},
+	{"**b*b*ab", true},
 	{"*ab", true},
 	{"**ab", true},
 	{"*baaabab", true},
@@ -50,11 +51,8 @@ var globTestPattern = []testCase{
 }
 
 func TestGlob_Match(t *testing.T) {
-	// t.Parallel()
 	for _, tt := range globTestPattern {
-		tt := tt
 		t.Run(tt.pattern, func(t *testing.T) {
-			// t.Parallel()
 			matcher, err := glob.Compile(tt.pattern)
 			if err != nil {
 				t.Fatal(err)
@@ -69,16 +67,38 @@ func TestGlob_Match(t *testing.T) {
 	}
 }
 
+func TestGlob_MatchOne(t *testing.T) {
+	const char = "a"
+	for _, tt := range []testCase{
+		{"a", true},
+		{"b", false},
+		{"*", true},
+		{"?", true},
+	} {
+		t.Run(tt.pattern, func(t *testing.T) {
+			matcher, err := glob.Compile(tt.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if match := matcher.Match(char); match != tt.match {
+				t.Fatalf("first Match want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match(char); match != tt.match {
+				t.Fatalf("second Match want %t, but got %t ", tt.match, match)
+			}
+		})
+	}
+}
+
 func TestGlob_MatchEmpty(t *testing.T) {
-	t.Parallel()
 	const empty = ""
 	for _, tt := range []testCase{
 		{"*", true},
 		{"", true},
+		{"a", false},
+		{"?", false},
 	} {
-		tt := tt
 		t.Run(tt.pattern, func(t *testing.T) {
-			t.Parallel()
 			matcher, err := glob.Compile(tt.pattern)
 			if err != nil {
 				t.Fatal(err)
@@ -94,7 +114,6 @@ func TestGlob_MatchEmpty(t *testing.T) {
 }
 
 func TestGlob_MatchMultiByte(t *testing.T) {
-	t.Parallel()
 	const pattern = "Hello 世界"
 	for _, tt := range []testCase{
 		{"*世界", true},
@@ -104,9 +123,7 @@ func TestGlob_MatchMultiByte(t *testing.T) {
 		{"Hello*??", true},
 		{"Hello", false},
 	} {
-		tt := tt
 		t.Run(tt.pattern, func(t *testing.T) {
-			t.Parallel()
 			matcher, err := glob.Compile(tt.pattern)
 			if err != nil {
 				t.Fatal(err)
@@ -149,11 +166,12 @@ var benchTests = []struct {
 }{
 	{"full string", "a*a*ab*a", "^a.*a.*ab.*a$"},
 	{"front asterisk", "*?a*a", ".a.*a$"},
-	{"last asterisk", "*a*a*", "a.*a"},
+	{"last asterisk", "a*a*", "^a.*a"},
 	{"equal", "aaaaaaaa", "^aaaaaaaa$"},
 	{"backward", "a*", "^a"},
 	{"forward", "*a", "a$"},
-	{"partial", "*a*", "a"},
+	{"partial(no prefix)", "*?a*", ".a"},
+	{"partial(prefix)", "*a*", "a"},
 	{"one pass", "a??a", "^a..a$"},
 }
 
