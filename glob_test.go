@@ -3,6 +3,7 @@ package glob_test
 import (
 	"math/rand"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/komem3/glob"
@@ -57,11 +58,14 @@ func TestGlob_Match(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if match := matcher.Match(globText); match != tt.match {
-				t.Fatalf("first Match want %t, but got %t ", tt.match, match)
+			if match := matcher.MatchString(globText); match != tt.match {
+				t.Fatalf("MatchString want %t, but got %t ", tt.match, match)
 			}
-			if match := matcher.Match(globText); match != tt.match {
-				t.Fatalf("second Match want %t, but got %t ", tt.match, match)
+			if match := matcher.MatchReader(strings.NewReader(globText)); match != tt.match {
+				t.Fatalf("MatchReader want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match([]byte(globText)); match != tt.match {
+				t.Fatalf("Match want %t, but got %t ", tt.match, match)
 			}
 		})
 	}
@@ -80,11 +84,14 @@ func TestGlob_MatchOne(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if match := matcher.Match(char); match != tt.match {
-				t.Fatalf("first Match want %t, but got %t ", tt.match, match)
+			if match := matcher.MatchString(char); match != tt.match {
+				t.Fatalf("MatchString want %t, but got %t ", tt.match, match)
 			}
-			if match := matcher.Match(char); match != tt.match {
-				t.Fatalf("second Match want %t, but got %t ", tt.match, match)
+			if match := matcher.MatchReader(strings.NewReader(char)); match != tt.match {
+				t.Fatalf("MatchReader want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match([]byte(char)); match != tt.match {
+				t.Fatalf("Match want %t, but got %t ", tt.match, match)
 			}
 		})
 	}
@@ -103,11 +110,14 @@ func TestGlob_MatchEmpty(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if match := matcher.Match(empty); match != tt.match {
-				t.Fatalf("first Match want %t, but got %t ", tt.match, match)
+			if match := matcher.MatchString(empty); match != tt.match {
+				t.Fatalf("MatchString want %t, but got %t ", tt.match, match)
 			}
-			if match := matcher.Match(empty); match != tt.match {
-				t.Fatalf("second Match want %t, but got %t ", tt.match, match)
+			if match := matcher.MatchReader(strings.NewReader(empty)); match != tt.match {
+				t.Fatalf("MatchReader want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match([]byte(empty)); match != tt.match {
+				t.Fatalf("Match want %t, but got %t ", tt.match, match)
 			}
 		})
 	}
@@ -128,11 +138,14 @@ func TestGlob_MatchMultiByte(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if match := matcher.Match(pattern); match != tt.match {
-				t.Fatalf("first Match want %t, but got %t ", tt.match, match)
+			if match := matcher.MatchString(pattern); match != tt.match {
+				t.Fatalf("MatchString want %t, but got %t ", tt.match, match)
 			}
-			if match := matcher.Match(pattern); match != tt.match {
-				t.Fatalf("second Match want %t, but got %t ", tt.match, match)
+			if match := matcher.MatchReader(strings.NewReader(pattern)); match != tt.match {
+				t.Fatalf("MatchReader want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match([]byte(pattern)); match != tt.match {
+				t.Fatalf("Match want %t, but got %t ", tt.match, match)
 			}
 		})
 	}
@@ -183,7 +196,7 @@ func BenchmarkGlob_Match(b *testing.B) {
 				matcher := glob.MustCompile(tt.globPattern)
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					matcher.Match(randStr[i%randNum])
+					matcher.MatchString(randStr[i%randNum])
 				}
 			})
 			b.Run("regex", func(b *testing.B) {

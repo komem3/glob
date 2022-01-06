@@ -14,10 +14,71 @@ package glob
 
 import (
 	"fmt"
+	"io"
 	"regexp"
 	"sync"
 	"unicode/utf8"
 )
+
+type steper interface {
+	step() rune
+}
+
+type stringStep struct {
+	str string
+}
+
+type byteStep struct {
+	bs []byte
+}
+
+type readerStep struct {
+	reader io.RuneReader
+}
+
+func (s *stringStep) step() rune {
+	r, size := utf8.DecodeRuneInString(s.str)
+	if r == utf8.RuneError {
+		return r
+	}
+	s.str = s.str[size:]
+	return r
+}
+
+func (b *byteStep) step() rune {
+	r, size := utf8.DecodeRune(b.bs)
+	if r == utf8.RuneError {
+		return r
+	}
+	b.bs = b.bs[size:]
+	return r
+}
+
+func (rs *readerStep) step() rune {
+	r, _, err := rs.reader.ReadRune()
+	if err != nil {
+		return utf8.RuneError
+	}
+	return r
+}
+
+var stringStepPool = sync.Pool{
+	New: func() interface{} {
+		return new(stringStep)
+	},
+}
+
+var byteStepPool = sync.Pool{
+	New: func() interface{} {
+		return new(byteStep)
+	},
+}
+
+var readerStepPool = sync.Pool{
+	New: func() interface{} {
+		return new(readerStep)
+	},
+}
 
 type kind int
 
@@ -86,7 +147,6 @@ type Glob struct {
 
 	dfaPool      *sync.Pool
 	onePassState *state
-	step         func(s string) (r rune, remain string)
 }
 
 // MustCompile is like Compile but panics if the expression cannot be parsed.
@@ -100,21 +160,12 @@ func MustCompile(pattern string) *Glob {
 
 // Compile compiles Glob from given pattern.
 func Compile(pattern string) (*Glob, error) {
-	runes := []rune(pattern)
-	// if exists last asterisk and not exist first asterisk, reverse pattern.
-	reverse := len(runes) >= 2 && runes[0] == '*' && runes[len(runes)-1] != '*'
-	if reverse {
-		for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-			runes[i], runes[j] = runes[j], runes[i]
-		}
-	}
-
 	var (
-		escape        bool
-		patternState  = &state{kind: startKind}
-		startState    = patternState
-		firstAsterisk bool
-		useDFA        bool
+		runes        = []rune(pattern)
+		escape       bool
+		patternState = &state{kind: startKind}
+		startState   = patternState
+		useDFA       bool
 	)
 	for i := 0; i < len(runes); i++ {
 		switch {
@@ -128,11 +179,7 @@ func Compile(pattern string) (*Glob, error) {
 			}
 			patternState.next = &state{kind: asteriskKind}
 			patternState = patternState.next
-			if i == 0 {
-				firstAsterisk = true
-				continue
-			}
-			if firstAsterisk || i != len(runes)-1 {
+			if i != len(runes)-1 {
 				useDFA = true
 			}
 		case !escape && runes[i] == '?':
@@ -160,11 +207,6 @@ func Compile(pattern string) (*Glob, error) {
 
 	glob := &Glob{
 		str: pattern,
-	}
-	if reverse {
-		glob.step = descStep
-	} else {
-		glob.step = ascStep
 	}
 
 	if useDFA {
@@ -209,9 +251,9 @@ func indexCloseSquare(str string) int {
 	return -1
 }
 
-func (g *Glob) onePassMatch(s string) bool {
+func (g *Glob) onePassMatch(steper steper) bool {
 	state := g.onePassState
-	for r, s := g.step(s); r != utf8.RuneError; r, s = g.step(s) {
+	for r := steper.step(); r != utf8.RuneError; r = steper.step() {
 		if state.kind == asteriskKind {
 			return true
 		}
@@ -223,11 +265,11 @@ func (g *Glob) onePassMatch(s string) bool {
 	return state.kind == asteriskKind || state.kind == matchedKind
 }
 
-func (g *Glob) dfaMatch(s string) bool {
+func (g *Glob) dfaMatch(steper steper) bool {
 	dfa := g.dfaPool.Get().(*dfaState)
 	startPtr := dfa
 
-	for r, s := g.step(s); r != utf8.RuneError; r, s = g.step(s) {
+	for r := steper.step(); r != utf8.RuneError; r = steper.step() {
 		next, ok := dfa.next[r]
 		if ok {
 			dfa = next
@@ -277,12 +319,43 @@ func (g *Glob) dfaMatch(s string) bool {
 	return false
 }
 
-// Match returns whether the given string matches compiled glob.
-func (g *Glob) Match(s string) bool {
+// Match returns whether the given bytes matches compiled glob.
+func (g *Glob) Match(bs []byte) bool {
+	steper := byteStepPool.Get().(*byteStep)
+	steper.bs = bs
+	defer func() {
+		stringStepPool.Put(steper)
+	}()
 	if g.onePassState != nil {
-		return g.onePassMatch(s)
+		return g.onePassMatch(steper)
 	}
-	return g.dfaMatch(s)
+	return g.dfaMatch(steper)
+}
+
+// MatchString returns whether the given string matches compiled glob.
+func (g *Glob) MatchString(s string) bool {
+	steper := stringStepPool.Get().(*stringStep)
+	steper.str = s
+	defer func() {
+		stringStepPool.Put(steper)
+	}()
+	if g.onePassState != nil {
+		return g.onePassMatch(steper)
+	}
+	return g.dfaMatch(steper)
+}
+
+// MatchReader returns whether the given reader matches compiled glob.
+func (g *Glob) MatchReader(reader io.RuneReader) bool {
+	steper := readerStepPool.Get().(*readerStep)
+	steper.reader = reader
+	defer func() {
+		stringStepPool.Put(steper)
+	}()
+	if g.onePassState != nil {
+		return g.onePassMatch(steper)
+	}
+	return g.dfaMatch(steper)
 }
 
 // String implements fmt.Stringer.
