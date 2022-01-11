@@ -21,7 +21,7 @@ import (
 )
 
 type steper interface {
-	step() rune
+	step(index int) (rune, int)
 }
 
 type stringStep struct {
@@ -36,30 +36,34 @@ type readerStep struct {
 	reader io.RuneReader
 }
 
-func (s *stringStep) step() rune {
-	r, size := utf8.DecodeRuneInString(s.str)
-	if r == utf8.RuneError {
-		return r
+func (s *stringStep) step(index int) (rune, int) {
+	if len(s.str) > index {
+		c := s.str[index]
+		if c < utf8.RuneSelf {
+			return rune(c), 1
+		}
+		return utf8.DecodeRuneInString(s.str[index:])
 	}
-	s.str = s.str[size:]
-	return r
+	return utf8.RuneError, 0
 }
 
-func (b *byteStep) step() rune {
-	r, size := utf8.DecodeRune(b.bs)
-	if r == utf8.RuneError {
-		return r
+func (b *byteStep) step(index int) (rune, int) {
+	if len(b.bs) > index {
+		c := b.bs[index]
+		if c < utf8.RuneSelf {
+			return rune(c), 1
+		}
+		return utf8.DecodeRune(b.bs[index:])
 	}
-	b.bs = b.bs[size:]
-	return r
+	return utf8.RuneError, 0
 }
 
-func (rs *readerStep) step() rune {
-	r, _, err := rs.reader.ReadRune()
+func (rs *readerStep) step(_ int) (rune, int) {
+	r, size, err := rs.reader.ReadRune()
 	if err != nil {
-		return utf8.RuneError
+		return utf8.RuneError, size
 	}
-	return r
+	return r, size
 }
 
 var stringStepPool = sync.Pool{
@@ -80,73 +84,85 @@ var readerStepPool = sync.Pool{
 	},
 }
 
+var backTrackPool = sync.Pool{
+	New: func() interface{} {
+		return new(posStack)
+	},
+}
+
+var dfaPool = sync.Pool{
+	New: func() interface{} {
+		return new(dfaState)
+	},
+}
+
 type kind int
 
 const (
-	startKind kind = iota + 1
-	matchedKind
+	matchedKind = iota + 1
 	runeKind
 	asteriskKind
 	questionKind
 	regexKind
 )
 
-type matchFunc func(r rune) bool
+type algorithm int
+
+const (
+	nfa algorithm = iota + 1
+	backtrack
+)
 
 type state struct {
-	match matchFunc
-	kind  kind
-	next  *state
+	kind kind
+	next *state
+
+	r  rune
+	re *regexp.Regexp
 }
 
 type dfaState struct {
 	list          []*state
 	asteriskNexts []*state
-	next          map[rune]*dfaState
 }
 
-func alwaysTrue(_ rune) bool {
-	return true
+type posStack struct {
+	index []int
+	state []*state
 }
 
-func alwaysFalse(_ rune) bool {
-	return false
+func (n *dfaState) reset() {
+	n.list = n.list[:0]
+	n.asteriskNexts = n.asteriskNexts[:0]
 }
 
-func regexMatchFunc(regex *regexp.Regexp) matchFunc {
-	return func(r rune) bool {
-		return regex.MatchString(string(r))
+func (p *posStack) push(index int, state *state) {
+	p.index = append(p.index, index)
+	p.state = append(p.state, state)
+}
+
+func (p *posStack) reset() {
+	p.index = p.index[:0]
+	p.state = p.state[:0]
+}
+
+func (p *posStack) pop() (int, *state) {
+	if len(p.index) == 0 {
+		return -1, nil
 	}
-}
-
-func runeMatchFunc(target rune) matchFunc {
-	return func(r rune) bool {
-		return target == r
-	}
-}
-
-func ascStep(s string) (rune, string) {
-	r, size := utf8.DecodeRuneInString(s)
-	if r == utf8.RuneError {
-		return utf8.RuneError, ""
-	}
-	return r, s[size:]
-}
-
-func descStep(s string) (rune, string) {
-	r, size := utf8.DecodeLastRuneInString(s)
-	if r == utf8.RuneError {
-		return utf8.RuneError, ""
-	}
-	return r, s[:len(s)-size]
+	lastIndex := p.index[len(p.index)-1]
+	lastaState := p.state[len(p.state)-1]
+	p.index = p.index[:len(p.index)-1]
+	p.state = p.state[:len(p.state)-1]
+	return lastIndex, lastaState
 }
 
 // Glob has compiled pattern.
 type Glob struct {
 	str string
 
-	dfaPool      *sync.Pool
-	onePassState *state
+	algorithm  algorithm
+	startState *state
 }
 
 // MustCompile is like Compile but panics if the expression cannot be parsed.
@@ -163,9 +179,9 @@ func Compile(pattern string) (*Glob, error) {
 	var (
 		runes        = []rune(pattern)
 		escape       bool
-		patternState = &state{kind: startKind}
+		patternState = &state{}
 		startState   = patternState
-		useDFA       bool
+		asterisks    int
 	)
 	for i := 0; i < len(runes); i++ {
 		switch {
@@ -179,11 +195,9 @@ func Compile(pattern string) (*Glob, error) {
 			}
 			patternState.next = &state{kind: asteriskKind}
 			patternState = patternState.next
-			if i != len(runes)-1 {
-				useDFA = true
-			}
+			asterisks++
 		case !escape && runes[i] == '?':
-			patternState.next = &state{match: alwaysTrue, kind: questionKind}
+			patternState.next = &state{kind: questionKind}
 			patternState = patternState.next
 		case !escape && runes[i] == '[':
 			end := indexCloseSquare(pattern[i:])
@@ -194,33 +208,29 @@ func Compile(pattern string) (*Glob, error) {
 			if err != nil {
 				return nil, err
 			}
-			patternState.next = &state{match: regexMatchFunc(regex), kind: regexKind}
+			patternState.next = &state{re: regex, kind: regexKind}
 			patternState = patternState.next
 			i += end
 		default:
-			patternState.next = &state{match: runeMatchFunc(runes[i]), kind: runeKind}
+			patternState.next = &state{r: runes[i], kind: runeKind}
 			patternState = patternState.next
 		}
 		escape = false
 	}
-	patternState.next = &state{match: alwaysFalse, kind: matchedKind}
+	patternState.next = &state{kind: matchedKind}
 
 	glob := &Glob{
-		str: pattern,
+		str:        pattern,
+		startState: startState.next,
 	}
 
-	if useDFA {
-		glob.dfaPool = &sync.Pool{New: func() interface{} {
-			dfa := &dfaState{next: make(map[rune]*dfaState)}
-			if startState.next.kind == asteriskKind {
-				dfa.asteriskNexts = append(dfa.asteriskNexts, startState.next.next)
-			} else {
-				dfa.list = append(dfa.list, startState.next)
-			}
-			return dfa
-		}}
+	// DFA approach requires o(n^2) times and n memory allocate.
+	// Backtrack approach requires o(n^2*asterisks) and asterisks memory allocate.
+	// So, use backtrack if pattern have less than two asterisks.
+	if asterisks < 2 {
+		glob.algorithm = backtrack
 	} else {
-		glob.onePassState = startState.next
+		glob.algorithm = nfa
 	}
 	return glob, nil
 }
@@ -251,71 +261,100 @@ func indexCloseSquare(str string) int {
 	return -1
 }
 
-func (g *Glob) onePassMatch(steper steper) bool {
-	state := g.onePassState
-	for r := steper.step(); r != utf8.RuneError; r = steper.step() {
-		if state.kind == asteriskKind {
-			return true
-		}
-		if !state.match(r) {
-			return false
-		}
-		state = state.next
-	}
-	return state.kind == asteriskKind || state.kind == matchedKind
-}
-
 func (g *Glob) dfaMatch(steper steper) bool {
-	dfa := g.dfaPool.Get().(*dfaState)
-	startPtr := dfa
+	// pattern is only one '*'.
+	if g.startState.kind == asteriskKind && g.startState.next.kind == matchedKind {
+		return true
+	}
 
-	for r := steper.step(); r != utf8.RuneError; r = steper.step() {
-		next, ok := dfa.next[r]
-		if ok {
-			dfa = next
-			continue
+	dfa := dfaPool.Get().(*dfaState)
+	defer func() {
+		dfa.reset()
+		dfaPool.Put(dfa)
+	}()
+
+	if g.startState.kind == asteriskKind {
+		dfa.asteriskNexts = append(dfa.asteriskNexts, g.startState.next)
+	} else {
+		dfa.list = append(dfa.list, g.startState)
+	}
+
+	var index int
+	for {
+		r, size := steper.step(index)
+		if r == utf8.RuneError {
+			break
 		}
-		if len(dfa.list) == 0 && len(dfa.asteriskNexts) == 0 {
-			g.dfaPool.Put(startPtr)
-			return false
-		}
-		var (
-			nlist         []*state
-			asteriskNexts = dfa.asteriskNexts
-		)
-		for _, states := range [][]*state{dfa.list, dfa.asteriskNexts} {
-			for _, state := range states {
+		index += size
+
+		list := dfa.list[:]
+		dfa.list = dfa.list[:0]
+		for _, stateList := range [2][]*state{list, dfa.asteriskNexts[:]} {
+			for _, state := range stateList {
 				if state.match(r) {
 					if state.next.kind == asteriskKind {
 						// The last asterisk matches all characters, so it's a match.
 						if state.next.next.kind == matchedKind {
-							g.dfaPool.Put(startPtr)
 							return true
 						}
-						asteriskNexts = append(asteriskNexts, state.next.next)
+						dfa.asteriskNexts = append(dfa.asteriskNexts, state.next.next)
 						continue
 					}
-					nlist = append(nlist, state.next)
+					dfa.list = append(dfa.list, state.next)
 				}
 			}
 		}
-		if len(nlist) == 0 && len(dfa.list) == 0 && len(asteriskNexts) == len(dfa.asteriskNexts) {
-			dfa.next[r] = dfa
-			continue
+		if len(dfa.asteriskNexts) == 0 && len(dfa.list) == 0 {
+			return false
 		}
-		next = &dfaState{list: nlist, asteriskNexts: asteriskNexts, next: make(map[rune]*dfaState)}
-		dfa.next[r] = next
-		dfa = next
 	}
 
 	for _, st := range dfa.list {
 		if (st.kind == asteriskKind && st.next.kind == matchedKind) ||
 			st.kind == matchedKind {
-			g.dfaPool.Put(startPtr)
 			return true
 		}
 	}
-	g.dfaPool.Put(startPtr)
+	return false
+}
+
+func (g *Glob) backtrack(steper steper) bool {
+	stack := backTrackPool.Get().(*posStack)
+	defer func() {
+		stack.reset()
+		backTrackPool.Put(stack)
+	}()
+
+	stack.push(0, g.startState)
+	for index, state := stack.pop(); state != nil; index, state = stack.pop() {
+		for {
+			r, size := steper.step(index)
+			if r == utf8.RuneError {
+				if state.kind == matchedKind ||
+					state.kind == asteriskKind && state.next.kind == matchedKind {
+					return true
+				}
+				break
+			}
+			index += size
+
+			if state.kind == asteriskKind {
+				if state.next.kind == matchedKind {
+					return true
+				}
+				if state.next.match(r) {
+					stack.push(index, state)
+					state = state.next.next
+				}
+				continue
+			}
+			if state.match(r) {
+				state = state.next
+				continue
+			}
+			break
+		}
+	}
 	return false
 }
 
@@ -324,10 +363,10 @@ func (g *Glob) Match(bs []byte) bool {
 	steper := byteStepPool.Get().(*byteStep)
 	steper.bs = bs
 	defer func() {
-		stringStepPool.Put(steper)
+		byteStepPool.Put(steper)
 	}()
-	if g.onePassState != nil {
-		return g.onePassMatch(steper)
+	if g.algorithm == backtrack {
+		return g.backtrack(steper)
 	}
 	return g.dfaMatch(steper)
 }
@@ -339,8 +378,8 @@ func (g *Glob) MatchString(s string) bool {
 	defer func() {
 		stringStepPool.Put(steper)
 	}()
-	if g.onePassState != nil {
-		return g.onePassMatch(steper)
+	if g.algorithm == backtrack {
+		return g.backtrack(steper)
 	}
 	return g.dfaMatch(steper)
 }
@@ -350,15 +389,27 @@ func (g *Glob) MatchReader(reader io.RuneReader) bool {
 	steper := readerStepPool.Get().(*readerStep)
 	steper.reader = reader
 	defer func() {
-		stringStepPool.Put(steper)
+		readerStepPool.Put(steper)
 	}()
-	if g.onePassState != nil {
-		return g.onePassMatch(steper)
-	}
 	return g.dfaMatch(steper)
 }
 
 // String implements fmt.Stringer.
 func (g *Glob) String() string {
 	return g.str
+}
+
+func (s *state) match(r rune) bool {
+	switch s.kind {
+	case runeKind:
+		return s.r == r
+	case regexKind:
+		return s.re.MatchString(string(r))
+	case questionKind:
+		return true
+	case matchedKind:
+		return false
+	default:
+		panic("unexpected kind")
+	}
 }
