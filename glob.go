@@ -13,15 +13,17 @@ special chars:
 package glob
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 	"sync"
 	"unicode/utf8"
 )
 
 type steper interface {
-	step(index int) (rune, int)
+	step(index int, state *state) (r rune, next int)
 }
 
 type stringStep struct {
@@ -36,32 +38,55 @@ type readerStep struct {
 	reader io.RuneReader
 }
 
-func (s *stringStep) step(index int) (rune, int) {
+func (s *stringStep) step(index int, state *state) (rune, int) {
 	if len(s.str) > index {
-		c := s.str[index]
-		if c < utf8.RuneSelf {
-			return rune(c), 1
+		if state != nil && state.strPrefix != "" {
+			prefixIndex := strings.Index(s.str[index:], state.strPrefix)
+			if prefixIndex == -1 {
+				return utf8.RuneError, -1
+			}
+			index += prefixIndex
+			r, size := utf8.DecodeRuneInString(s.str[index:])
+			return r, index + size
 		}
-		return utf8.DecodeRuneInString(s.str[index:])
+		r, size := utf8.DecodeRuneInString(s.str[index:])
+		return r, index + size
 	}
-	return utf8.RuneError, 0
+	return utf8.RuneError, -1
 }
 
-func (b *byteStep) step(index int) (rune, int) {
+func (b *byteStep) step(index int, state *state) (rune, int) {
 	if len(b.bs) > index {
-		c := b.bs[index]
-		if c < utf8.RuneSelf {
-			return rune(c), 1
+		if state != nil && state.bytesPrefix != nil {
+			prefixIndex := bytes.Index(b.bs[index:], state.bytesPrefix)
+			if prefixIndex == -1 {
+				return utf8.RuneError, -1
+			}
+			index += prefixIndex
+			r, size := utf8.DecodeRune(b.bs[index:])
+			return r, index + size
 		}
-		return utf8.DecodeRune(b.bs[index:])
+		r, size := utf8.DecodeRune(b.bs[index:])
+		return r, index + size
 	}
-	return utf8.RuneError, 0
+	return utf8.RuneError, -1
 }
 
-func (rs *readerStep) step(_ int) (rune, int) {
+func (rs *readerStep) step(_ int, state *state) (rune, int) {
+	if state != nil && state.kind == runeKind {
+		for {
+			r, size, err := rs.reader.ReadRune()
+			if err != nil {
+				return utf8.RuneError, -1
+			}
+			if r == state.r {
+				return r, size
+			}
+		}
+	}
 	r, size, err := rs.reader.ReadRune()
 	if err != nil {
-		return utf8.RuneError, size
+		return utf8.RuneError, -1
 	}
 	return r, size
 }
@@ -106,16 +131,12 @@ const (
 	regexKind
 )
 
-type algorithm int
-
-const (
-	nfa algorithm = iota + 1
-	backtrack
-)
-
 type state struct {
 	kind kind
 	next *state
+
+	strPrefix   string
+	bytesPrefix []byte
 
 	r  rune
 	re *regexp.Regexp
@@ -123,46 +144,44 @@ type state struct {
 
 type dfaState struct {
 	list          []*state
-	asteriskNexts []*state
+	asteriskNexts *state
 }
 
 type posStack struct {
-	index []int
-	state []*state
+	index int
+	state *state
 }
 
 func (n *dfaState) reset() {
 	n.list = n.list[:0]
-	n.asteriskNexts = n.asteriskNexts[:0]
+	n.asteriskNexts = nil
 }
 
 func (p *posStack) push(index int, state *state) {
-	p.index = append(p.index, index)
-	p.state = append(p.state, state)
+	p.index = index
+	p.state = state
 }
 
 func (p *posStack) reset() {
-	p.index = p.index[:0]
-	p.state = p.state[:0]
+	p.index = 0
+	p.state = nil
 }
 
 func (p *posStack) pop() (int, *state) {
-	if len(p.index) == 0 {
+	if p.state == nil {
 		return -1, nil
 	}
-	lastIndex := p.index[len(p.index)-1]
-	lastaState := p.state[len(p.state)-1]
-	p.index = p.index[:len(p.index)-1]
-	p.state = p.state[:len(p.state)-1]
-	return lastIndex, lastaState
+	index, state := p.index, p.state
+	p.reset()
+	return index, state
 }
 
 // Glob has compiled pattern.
 type Glob struct {
-	str string
-
-	algorithm  algorithm
+	str        string
 	startState *state
+
+	onePass bool
 }
 
 // MustCompile is like Compile but panics if the expression cannot be parsed.
@@ -182,7 +201,16 @@ func Compile(pattern string) (*Glob, error) {
 		patternState = &state{}
 		startState   = patternState
 		asterisks    int
+		prefixState  *state
+		prefixBuf    = new(bytes.Buffer)
 	)
+	prefixAdd := func() {
+		if prefixState != nil {
+			prefixState.strPrefix = prefixBuf.String()
+			prefixState.bytesPrefix = prefixBuf.Bytes()
+		}
+		prefixState = nil
+	}
 	for i := 0; i < len(runes); i++ {
 		switch {
 		case !escape && runes[i] == '\\':
@@ -196,9 +224,11 @@ func Compile(pattern string) (*Glob, error) {
 			patternState.next = &state{kind: asteriskKind}
 			patternState = patternState.next
 			asterisks++
+			prefixAdd()
 		case !escape && runes[i] == '?':
 			patternState.next = &state{kind: questionKind}
 			patternState = patternState.next
+			prefixAdd()
 		case !escape && runes[i] == '[':
 			end := indexCloseSquare(pattern[i:])
 			if end == -1 {
@@ -211,27 +241,27 @@ func Compile(pattern string) (*Glob, error) {
 			patternState.next = &state{re: regex, kind: regexKind}
 			patternState = patternState.next
 			i += end
+			prefixAdd()
 		default:
 			patternState.next = &state{r: runes[i], kind: runeKind}
 			patternState = patternState.next
+			if prefixState == nil {
+				prefixState = patternState
+				prefixBuf = new(bytes.Buffer)
+			}
+			prefixBuf.WriteRune(runes[i])
 		}
 		escape = false
 	}
+	prefixAdd()
 	patternState.next = &state{kind: matchedKind}
 
 	glob := &Glob{
 		str:        pattern,
 		startState: startState.next,
+		onePass:    asterisks == 0,
 	}
 
-	// DFA approach requires o(n^2) times and n memory allocate.
-	// Backtrack approach requires o(n^2*asterisks) and asterisks memory allocate.
-	// So, use backtrack if pattern have less than two asterisks.
-	if asterisks < 2 {
-		glob.algorithm = backtrack
-	} else {
-		glob.algorithm = nfa
-	}
 	return glob, nil
 }
 
@@ -274,48 +304,55 @@ func (g *Glob) dfaMatch(steper steper) bool {
 	}()
 
 	if g.startState.kind == asteriskKind {
-		dfa.asteriskNexts = append(dfa.asteriskNexts, g.startState.next)
+		dfa.asteriskNexts = g.startState.next
+		dfa.list = append(dfa.list, g.startState.next)
 	} else {
 		dfa.list = append(dfa.list, g.startState)
 	}
 
-	var index int
+	var (
+		index   int
+		r       rune
+		matched = len(dfa.list) > 0 && dfa.list[0].kind == matchedKind
+	)
 	for {
-		r, size := steper.step(index)
-		if r == utf8.RuneError {
-			break
+		if !matched && dfa.asteriskNexts != nil && len(dfa.list) == 0 {
+			r, index = steper.step(index, dfa.asteriskNexts)
+		} else {
+			r, index = steper.step(index, nil)
 		}
-		index += size
+		if r == utf8.RuneError {
+			return matched
+		}
 
+		matched = false
 		list := dfa.list[:]
 		dfa.list = dfa.list[:0]
-		for _, stateList := range [2][]*state{list, dfa.asteriskNexts[:]} {
-			for _, state := range stateList {
-				if state.match(r) {
-					if state.next.kind == asteriskKind {
-						// The last asterisk matches all characters, so it's a match.
-						if state.next.next.kind == matchedKind {
-							return true
-						}
-						dfa.asteriskNexts = append(dfa.asteriskNexts, state.next.next)
-						continue
+		for _, state := range list {
+			if state.match(r) {
+				if state.next.kind == asteriskKind {
+					// The last asterisk matches all characters, so it's a match.
+					if state.next.next.kind == matchedKind {
+						return true
 					}
-					dfa.list = append(dfa.list, state.next)
+					dfa.asteriskNexts = state.next.next
+					dfa.list = dfa.list[:0]
+					break
 				}
+				if state.next.kind == matchedKind {
+					matched = true
+					continue
+				}
+				dfa.list = append(dfa.list, state.next)
 			}
 		}
-		if len(dfa.asteriskNexts) == 0 && len(dfa.list) == 0 {
+		if dfa.asteriskNexts != nil {
+			dfa.list = append(dfa.list, dfa.asteriskNexts)
+		}
+		if !matched && dfa.asteriskNexts == nil && len(dfa.list) == 0 {
 			return false
 		}
 	}
-
-	for _, st := range dfa.list {
-		if (st.kind == asteriskKind && st.next.kind == matchedKind) ||
-			st.kind == matchedKind {
-			return true
-		}
-	}
-	return false
 }
 
 func (g *Glob) backtrack(steper steper) bool {
@@ -325,10 +362,15 @@ func (g *Glob) backtrack(steper steper) bool {
 		backTrackPool.Put(stack)
 	}()
 
+	var r rune
 	stack.push(0, g.startState)
 	for index, state := stack.pop(); state != nil; index, state = stack.pop() {
 		for {
-			r, size := steper.step(index)
+			if state.kind == asteriskKind {
+				r, index = steper.step(index, state.next)
+			} else {
+				r, index = steper.step(index, nil)
+			}
 			if r == utf8.RuneError {
 				if state.kind == matchedKind ||
 					state.kind == asteriskKind && state.next.kind == matchedKind {
@@ -336,7 +378,6 @@ func (g *Glob) backtrack(steper steper) bool {
 				}
 				break
 			}
-			index += size
 
 			if state.kind == asteriskKind {
 				if state.next.kind == matchedKind {
@@ -358,6 +399,25 @@ func (g *Glob) backtrack(steper steper) bool {
 	return false
 }
 
+func (g *Glob) onePassMatch(steper steper) bool {
+	var (
+		r     rune
+		index int
+		state = g.startState
+	)
+	for {
+		r, index = steper.step(index, nil)
+		if r == utf8.RuneError {
+			return state.kind == matchedKind
+		}
+		if state.match(r) {
+			state = state.next
+			continue
+		}
+		return false
+	}
+}
+
 // Match returns whether the given bytes matches compiled glob.
 func (g *Glob) Match(bs []byte) bool {
 	steper := byteStepPool.Get().(*byteStep)
@@ -365,10 +425,10 @@ func (g *Glob) Match(bs []byte) bool {
 	defer func() {
 		byteStepPool.Put(steper)
 	}()
-	if g.algorithm == backtrack {
-		return g.backtrack(steper)
+	if g.onePass {
+		return g.onePassMatch(steper)
 	}
-	return g.dfaMatch(steper)
+	return g.backtrack(steper)
 }
 
 // MatchString returns whether the given string matches compiled glob.
@@ -378,10 +438,10 @@ func (g *Glob) MatchString(s string) bool {
 	defer func() {
 		stringStepPool.Put(steper)
 	}()
-	if g.algorithm == backtrack {
-		return g.backtrack(steper)
+	if g.onePass {
+		return g.onePassMatch(steper)
 	}
-	return g.dfaMatch(steper)
+	return g.backtrack(steper)
 }
 
 // MatchReader returns whether the given reader matches compiled glob.
@@ -391,6 +451,9 @@ func (g *Glob) MatchReader(reader io.RuneReader) bool {
 	defer func() {
 		readerStepPool.Put(steper)
 	}()
+	if g.onePass {
+		return g.onePassMatch(steper)
+	}
 	return g.dfaMatch(steper)
 }
 

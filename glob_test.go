@@ -178,20 +178,20 @@ var benchTests = []struct {
 	regexPattern string
 }{
 	{"full string", "a*a*ab*a", "^a.*a.*ab.*a$"},
-	{"front asterisk", "*?a*a", ".a.*a$"},
+	{"front asterisk", "*?ab*c*d*a?ba", ".ab.*c.*d.*a.ba$"},
 	{"last asterisk", "a*a*", "^a.*a"},
 	{"equal", "aaaaaaaa", "^aaaaaaaa$"},
 	{"forward", "a*", "^a"},
 	{"backward", "*a", "a$"},
-	{"partial(no prefix)", "*?a*", ".a"},
-	{"partial(prefix)", "*a*", "a"},
+	{"partial(no prefix)", "*?a*c*e*d*", ".a.*c.*e.*d"},
+	{"partial(prefix)", "*a*c*e*d*", "a.*c.*e.*d"},
 	{"one pass", "a??a", "^a..a$"},
 }
 
 func BenchmarkGlob_Match(b *testing.B) {
 	randStr := randSeq()
 	for _, tt := range benchTests {
-		b.Run(tt.name, func(b *testing.B) {
+		b.Run(tt.name+"[String]", func(b *testing.B) {
 			b.Run("glob", func(b *testing.B) {
 				matcher := glob.MustCompile(tt.globPattern)
 				b.ResetTimer()
@@ -204,6 +204,24 @@ func BenchmarkGlob_Match(b *testing.B) {
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					matcher.MatchString(randStr[i%randNum])
+				}
+			})
+		})
+	}
+	for _, tt := range benchTests {
+		b.Run(tt.name+"[Reader]", func(b *testing.B) {
+			b.Run("glob", func(b *testing.B) {
+				matcher := glob.MustCompile(tt.globPattern)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					matcher.MatchReader(strings.NewReader(randStr[i%randNum]))
+				}
+			})
+			b.Run("regex", func(b *testing.B) {
+				matcher := regexp.MustCompile(tt.regexPattern)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					matcher.MatchReader(strings.NewReader(randStr[i%randNum]))
 				}
 			})
 		})
