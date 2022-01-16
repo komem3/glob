@@ -115,9 +115,9 @@ var backTrackPool = sync.Pool{
 	},
 }
 
-var dfaPool = sync.Pool{
+var nfaPool = sync.Pool{
 	New: func() interface{} {
-		return new(dfaState)
+		return new(nfaState)
 	},
 }
 
@@ -142,7 +142,7 @@ type state struct {
 	re *regexp.Regexp
 }
 
-type dfaState struct {
+type nfaState struct {
 	list          []*state
 	asteriskNexts *state
 }
@@ -152,7 +152,7 @@ type posStack struct {
 	state *state
 }
 
-func (n *dfaState) reset() {
+func (n *nfaState) reset() {
 	n.list = n.list[:0]
 	n.asteriskNexts = nil
 }
@@ -291,33 +291,33 @@ func indexCloseSquare(str string) int {
 	return -1
 }
 
-func (g *Glob) dfaMatch(steper steper) bool {
+func (g *Glob) nfaMatch(steper steper) bool {
 	// pattern is only one '*'.
 	if g.startState.kind == asteriskKind && g.startState.next.kind == matchedKind {
 		return true
 	}
 
-	dfa := dfaPool.Get().(*dfaState)
+	nfa := nfaPool.Get().(*nfaState)
 	defer func() {
-		dfa.reset()
-		dfaPool.Put(dfa)
+		nfa.reset()
+		nfaPool.Put(nfa)
 	}()
 
 	if g.startState.kind == asteriskKind {
-		dfa.asteriskNexts = g.startState.next
-		dfa.list = append(dfa.list, g.startState.next)
+		nfa.asteriskNexts = g.startState.next
+		nfa.list = append(nfa.list, g.startState.next)
 	} else {
-		dfa.list = append(dfa.list, g.startState)
+		nfa.list = append(nfa.list, g.startState)
 	}
 
 	var (
 		index   int
 		r       rune
-		matched = len(dfa.list) > 0 && dfa.list[0].kind == matchedKind
+		matched = len(nfa.list) > 0 && nfa.list[0].kind == matchedKind
 	)
 	for {
-		if !matched && dfa.asteriskNexts != nil && len(dfa.list) == 0 {
-			r, index = steper.step(index, dfa.asteriskNexts)
+		if !matched && nfa.asteriskNexts != nil && len(nfa.list) == 0 {
+			r, index = steper.step(index, nfa.asteriskNexts)
 		} else {
 			r, index = steper.step(index, nil)
 		}
@@ -326,8 +326,8 @@ func (g *Glob) dfaMatch(steper steper) bool {
 		}
 
 		matched = false
-		list := dfa.list[:]
-		dfa.list = dfa.list[:0]
+		list := nfa.list[:]
+		nfa.list = nfa.list[:0]
 		for _, state := range list {
 			if state.match(r) {
 				if state.next.kind == asteriskKind {
@@ -335,21 +335,21 @@ func (g *Glob) dfaMatch(steper steper) bool {
 					if state.next.next.kind == matchedKind {
 						return true
 					}
-					dfa.asteriskNexts = state.next.next
-					dfa.list = dfa.list[:0]
+					nfa.asteriskNexts = state.next.next
+					nfa.list = nfa.list[:0]
 					break
 				}
 				if state.next.kind == matchedKind {
 					matched = true
 					continue
 				}
-				dfa.list = append(dfa.list, state.next)
+				nfa.list = append(nfa.list, state.next)
 			}
 		}
-		if dfa.asteriskNexts != nil {
-			dfa.list = append(dfa.list, dfa.asteriskNexts)
+		if nfa.asteriskNexts != nil {
+			nfa.list = append(nfa.list, nfa.asteriskNexts)
 		}
-		if !matched && dfa.asteriskNexts == nil && len(dfa.list) == 0 {
+		if !matched && nfa.asteriskNexts == nil && len(nfa.list) == 0 {
 			return false
 		}
 	}
@@ -454,7 +454,7 @@ func (g *Glob) MatchReader(reader io.RuneReader) bool {
 	if g.onePass {
 		return g.onePassMatch(steper)
 	}
-	return g.dfaMatch(steper)
+	return g.nfaMatch(steper)
 }
 
 // String implements fmt.Stringer.
