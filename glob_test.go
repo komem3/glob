@@ -123,6 +123,32 @@ func TestGlob_MatchEmpty(t *testing.T) {
 	}
 }
 
+func TestGlob_MatchSpecialChar(t *testing.T) {
+	const specialChars = `\\*\?\[]`
+	for _, tt := range []testCase{
+		{"*", true},
+		{`\\\\\*\\\?\\\[\]`, true},
+		{`*\]`, true},
+		{`\\`, false},
+	} {
+		t.Run(tt.pattern, func(t *testing.T) {
+			matcher, err := glob.Compile(tt.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if match := matcher.MatchString(specialChars); match != tt.match {
+				t.Fatalf("MatchString want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.MatchReader(strings.NewReader(specialChars)); match != tt.match {
+				t.Fatalf("MatchReader want %t, but got %t ", tt.match, match)
+			}
+			if match := matcher.Match([]byte(specialChars)); match != tt.match {
+				t.Fatalf("Match want %t, but got %t ", tt.match, match)
+			}
+		})
+	}
+}
+
 func TestGlob_MatchMultiByte(t *testing.T) {
 	const pattern = "Hello 世界"
 	for _, tt := range []testCase{
