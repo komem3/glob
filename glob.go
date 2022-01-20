@@ -8,7 +8,7 @@ If you want to use filename expansion pattern, use filepath.Glob.
 special chars:
 	'?' A <question-mark> is a pattern that shall match any character.
 	'*' An <asterisk> is a pattern that shall match multiple characters, as described in Patterns Matching Multiple Characters.
-	'[' If an open bracket introduces a bracket expression as in RE Bracket Expression. See regexp/syntax.
+	'[' If an open bracket introduces a bracket expression as in RE Bracket Expression.
 */
 package glob
 
@@ -16,7 +16,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -128,7 +127,7 @@ const (
 	runeKind
 	asteriskKind
 	questionKind
-	regexKind
+	bracketKind
 )
 
 type state struct {
@@ -138,8 +137,8 @@ type state struct {
 	strPrefix   string
 	bytesPrefix []byte
 
-	r  rune
-	re *regexp.Regexp
+	r       rune
+	bracket *bracket
 }
 
 type nfaState struct {
@@ -230,15 +229,15 @@ func Compile(pattern string) (*Glob, error) {
 			patternState = patternState.next
 			prefixAdd()
 		case !escape && runes[i] == '[':
-			end := indexCloseSquare(pattern[i:])
+			end := indexCloseSquare(runes[i:])
 			if end == -1 {
 				return nil, fmt.Errorf("there is no ']' corresponding to '['")
 			}
-			regex, err := regexp.Compile(pattern[i : i+end+1])
+			bracket, err := newBracket(runes[i : i+end+1])
 			if err != nil {
 				return nil, err
 			}
-			patternState.next = &state{re: regex, kind: regexKind}
+			patternState.next = &state{bracket: bracket, kind: bracketKind}
 			patternState = patternState.next
 			i += end
 			prefixAdd()
@@ -265,26 +264,23 @@ func Compile(pattern string) (*Glob, error) {
 	return glob, nil
 }
 
-func indexCloseSquare(str string) int {
+func indexCloseSquare(runes []rune) int {
 	var (
-		escape     bool
-		match      bool
-		matchIndex int
+		escape      bool
+		expectMatch int
 	)
-	for i, r := range str {
-		if match {
-			if r == ']' {
-				return i
-			}
-			return matchIndex
-		}
-		if !escape && r == '\\' {
+	for i, r := range runes {
+		switch {
+		case !escape && r == '\\':
 			escape = true
 			continue
-		}
-		if !escape && r == ']' {
-			match = true
-			matchIndex = i
+		case !escape && r == '[':
+			expectMatch++
+		case !escape && r == ']':
+			expectMatch--
+			if expectMatch == 0 {
+				return i
+			}
 		}
 		escape = false
 	}
@@ -466,8 +462,8 @@ func (s *state) match(r rune) bool {
 	switch s.kind {
 	case runeKind:
 		return s.r == r
-	case regexKind:
-		return s.re.MatchString(string(r))
+	case bracketKind:
+		return s.bracket.match(r)
 	case questionKind:
 		return true
 	case matchedKind:

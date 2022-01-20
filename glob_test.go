@@ -37,7 +37,7 @@ var globTestPattern = []testCase{
 	{"?*", true},
 	{"?a*ba?", true},
 	{"??*??", true},
-	{"[ab][^c]aaba[[:alnum:]]", true},
+	{"[ab][^cd][[:lower:]][^[:upper:]][a-z][^A-Z][[:alnum:]]", true},
 	// mismatch pattern
 	{"a", false},
 	{"b**a", false},

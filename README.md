@@ -9,7 +9,7 @@ This is implemented according to [IEEE Std 1003.1-2017](https://pubs.opengroup.o
 
 - `?`: A `<question-mark>` is a pattern that shall match any character.
 - `*`: An `<asterisk>` is a pattern that shall match multiple characters, as described in Patterns Matching Multiple Characters.
-- `[`: If an open bracket introduces a bracket expression as in RE Bracket Expression. See [regexp/syntax](https://pkg.go.dev/regexp/syntax).
+- `[`: If an open bracket introduces a bracket expression as in RE Bracket Expression.
 
 ## Usage
 
