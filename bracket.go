@@ -2,7 +2,6 @@ package glob
 
 import (
 	"fmt"
-	"log"
 )
 
 type bracket struct {
@@ -23,7 +22,6 @@ type charRange struct {
 //	newBracket("[a-zA-Z]")
 //	newBracket("[[:alpha:]")
 func newBracket(pattern []rune) (*bracket, error) {
-	log.Printf("%s", string(pattern))
 	if len(pattern) < 2 {
 		return nil, fmt.Errorf("%s is expected '[regex bracket]'", string(pattern))
 	}
